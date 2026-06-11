@@ -5,12 +5,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Watchlist: tickers to monitor
-WATCHLIST = [
+# Core watchlist: always monitored (your high-conviction names)
+CORE_WATCHLIST = [
     "NVDA", "MRVL", "MU", "AMD", "INTC", "QCOM",
     "TSLA", "AAPL", "MSFT", "GOOGL", "META", "AMZN",
     "DELL", "HPE", "SMCI", "ARM", "AVGO", "TSM",
 ]
+
+# Discovery settings
+MAX_WATCHLIST_SIZE = 100         # Max unique tickers from discovery
+MAX_HOURLY_TICKERS = 50          # Cap hourly scan (rate limit: ~50/hour sustainable)
 
 # High-signal public figures (for news scanning)
 SIGNAL_FIGURES = [
@@ -19,9 +23,7 @@ SIGNAL_FIGURES = [
 ]
 
 # Scoring thresholds
-ANALYST_UPSIDE_MIN = 0.20          # 20% minimum analyst upside
-ALERT_SCORE_THRESHOLD = 6.0        # Composite score to trigger alert (out of 15)
-MIN_ANALYST_COUNT = 5              # Require minimum analyst coverage
+ALERT_SCORE_THRESHOLD = 5.0       # Composite score to trigger alert (out of 10)
 
 # Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")

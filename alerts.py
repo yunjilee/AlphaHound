@@ -15,7 +15,7 @@ def send_telegram(message: str) -> bool:
         resp = requests.post(url, json={
             "chat_id": TELEGRAM_CHAT_ID,
             "text": message,
-            "parse_mode": "Markdown",
+            "parse_mode": "HTML",
         }, timeout=10)
         return resp.status_code == 200
     except Exception as e:
@@ -29,26 +29,71 @@ def send_alert(score: dict) -> bool:
     b = score["score_breakdown"]
     triggers = score.get("alert_triggers", [])
     
-    # Build trigger list
+    # Build trigger list (replace underscores for display)
     trigger_lines = ""
     if triggers:
-        trigger_lines = "\n⚡ *Triggers*\n" + "\n".join(f"   • {t}" for t in triggers)
+        display_triggers = [t.replace("_", " ") for t in triggers]
+        trigger_lines = "\nTriggers: " + ", ".join(display_triggers)
     
-    fundamental_pts = b["analyst_upside"] + b["peg"] + b["analyst_coverage"] + b["position_in_range"]
+    # Calculate category scores (raw)
+    quality_raw = b.get("roe", 0) + b.get("margin", 0) + b.get("debt", 0)
+    growth_raw = b.get("eps_growth", 0) + b.get("pe_discount", 0)
+    value_raw = b.get("peg", 0) + b.get("analyst_upside", 0)
+    
+    # Scale to /10 for display (max: quality=2.5, growth=2, value=2)
+    quality = (quality_raw / 2.5) * 10
+    growth = (growth_raw / 2.0) * 10
+    value = (value_raw / 2.0) * 10
     
     # Format prices safely
-    current = f.get('current_price', 0)
-    target = f.get('analyst_target_mean', 0)
-    upside = f.get('analyst_upside_pct', 0)
+    current = f.get('current_price', 0) or 0
+    target = f.get('analyst_target_mean', 0) or 0
+    upside = f.get('analyst_upside_pct', 0) or 0
+    daily_change = f.get('daily_change_pct', 0) or 0
     
-    msg = f"""🔔 *{score['ticker']}* — Score: {score['composite_score']:.1f}/15
+    # PEG with context
+    peg = f.get('peg_ratio')
+    if peg:
+        if peg < 1.0:
+            peg_str = f"{peg:.2f} (cheap)"
+        elif peg < 2.0:
+            peg_str = f"{peg:.2f} (fair)"
+        else:
+            peg_str = f"{peg:.2f} (expensive)"
+    else:
+        peg_str = "N/A"
+    
+    # Analysts with context
+    analyst_count = f.get('analyst_count', 0) or 0
+    if analyst_count >= 30:
+        analyst_str = f"{analyst_count} (high)"
+    elif analyst_count >= 10:
+        analyst_str = f"{analyst_count} (moderate)"
+    elif analyst_count > 0:
+        analyst_str = f"{analyst_count} (low)"
+    else:
+        analyst_str = "N/A"
+    
+    # Score conclusion
+    composite = score['composite_score']
+    if composite >= 7.0:
+        conclusion = "strong buy"
+    elif composite >= 5.0:
+        conclusion = "buy"
+    elif composite >= 3.0:
+        conclusion = "hold"
+    else:
+        conclusion = "weak"
+    
+    # Format daily change with +/- sign
+    daily_sign = "+" if daily_change >= 0 else ""
+    
+    msg = f"""<b>{score['ticker']}</b> — {score['composite_score']:.1f}/10 ({conclusion})
 
-📊 *Fundamentals* ({fundamental_pts:.1f} pts)
-   Analyst: +{upside*100:.0f}% upside (${current:.0f} → ${target:.0f})
-   PEG: {f.get('peg_ratio') or 'N/A'}, {f.get('analyst_count', 0)} analysts
-{trigger_lines}
-
-📈 Alt data: insider={b['insider']:.1f}, reddit={b['reddit']:.1f}, trends={b['trends']:.1f}, news={b['news']:.1f}"""
+Quality: {quality:.0f}/10 | Growth: {growth:.0f}/10 | Value: {value:.0f}/10
+Price: ${current:.2f} ({daily_sign}{daily_change*100:.1f}% today)
+Target Price: ${target:.2f} ({upside*100:+.0f}%)
+PEG: {peg_str} | Analysts: {analyst_str}{trigger_lines}"""
     
     return send_telegram(msg)
 
@@ -56,14 +101,30 @@ def send_alert(score: dict) -> bool:
 def send_daily_digest(scores: list[dict]) -> bool:
     """Send daily digest of top tickers."""
     if not scores:
-        return send_telegram("📋 Daily digest: No qualifying tickers today.")
+        return send_telegram("Daily digest: No qualifying tickers today.")
     
-    lines = ["📋 *Daily Alpha Digest*\n"]
+    lines = ["<b>Daily Report (Current → Target)</b>\n"]
     for s in scores[:5]:
         f = s["signals"]["fundamentals"]
         triggers = s.get("alert_triggers", [])
-        trigger_str = f" ⚡{len(triggers)}" if triggers else ""
-        upside = f.get('analyst_upside_pct', 0)
-        lines.append(f"• *{s['ticker']}* — {s['composite_score']:.1f}/15 (+{upside*100:.0f}%){trigger_str}")
+        stars = "⭐" * len(triggers) if triggers else ""
+        
+        # Price data
+        current = f.get('current_price', 0) or 0
+        target = f.get('analyst_target_mean', 0) or 0
+        upside = f.get('analyst_upside_pct', 0) or 0
+        
+        # PEG
+        peg = f.get('peg_ratio')
+        peg_str = f"PEG {peg:.1f}" if peg else ""
+        
+        lines.append(
+            f"<b>{s['ticker']}</b> {s['composite_score']:.1f} | "
+            f"${current:.0f} → ${target:.0f} ({upside*100:+.0f}%) | "
+            f"{peg_str} {stars}"
+        )
+    
+    # Add context legend
+    lines.append("\n<i>PEG: &lt;1 cheap, 1-2 fair, &gt;2 expensive</i>")
     
     return send_telegram("\n".join(lines))

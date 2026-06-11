@@ -1,44 +1,140 @@
-# Stock Alpha Detection System — MVP Design Doc
+# AlphaHound — Stock Discovery System Design Doc
 
 ## Overview
 
-A Python pipeline that identifies high-upside "sleeper" stocks by combining analyst price targets with fundamental valuation signals. Sends Telegram alerts and logs all signals for future backtesting.
+A Python-based stock scanner for retail investors seeking quality growth stocks for 1-2 year investment horizons. Uses a **fundamentals-first approach** (Quality → Growth → Value) with insider buying as a confirmation catalyst.
+
+**Investment Philosophy:** Find institutional-quality companies ($2B+ market cap) with strong fundamentals that are reasonably priced relative to their growth. Insider buying is a bonus signal that adds conviction, not a gating filter.
+
+**Why fundamentals-first?** Backtesting showed that insider-first approaches miss great opportunities. Example: MU (Micron) in early 2025 had excellent fundamentals (ROE 40%, PEG 0.08, Forward P/E << Trailing P/E) but insider selling. A fundamentals-first approach catches these; insider-first would filter them out.
 
 **Goals:**
-- Detect stocks with ≥20% analyst upside that are fundamentally undervalued
-- Score and rank stocks on a composite alpha score
-- Alert via Telegram for high-scoring tickers; daily digest for top picks
-- Log every signal to SQLite for backtesting
+- Discover quality growth stocks via multi-factor Finviz screening
+- Score stocks on fundamentals + alternative data (max 20 pts)
+- Prioritize stocks appearing in multiple screens (highest conviction)
+- Alert via Telegram for high-scoring tickers
 
 **Non-goals (MVP):**
 - No live trading / brokerage integration
-- No cloud deployment (runs locally)
 - No ML model training (rule-based scoring only)
-- No social media monitoring (Reddit/Twitter APIs are unreliable/costly — defer to v2)
-- No real-time news monitoring (RSS polling adds complexity for marginal MVP value)
+- No real-time streaming (batch scans only)
 
 ---
 
-## Project Structure
+## Design Review: Quant Perspective
+
+### Is This Realistically Useful?
+
+**YES, with caveats.** This system provides genuine value for retail investors who:
+1. Don't have Bloomberg/FactSet/Capital IQ subscriptions ($20K+/year)
+2. Want systematic screening rather than stock tips from Reddit
+3. Have a 1-2 year investment horizon (not day trading)
+
+**What it does well:**
+- Multi-factor fundamental screening (the core of institutional investing)
+- Forward P/E < Trailing P/E check (a legitimate GARP signal)
+- Multi-screen overlap detection (reduces false positives)
+- Systematic logging for tracking performance over time
+
+**What it cannot do:**
+- Compete with institutional-grade data (their data is faster, cleaner, more granular)
+- Predict short-term price moves (no one can reliably)
+- Replace deep fundamental research (this is screening, not analysis)
+
+### Is the Scoring Methodology Sound?
+
+**Partially.** The current scoring has strengths and weaknesses:
+
+**Strengths:**
+| Component | Rationale | Academic Support |
+|-----------|-----------|------------------|
+| PEG ratio | Growth at Reasonable Price | Lynch (1989), widely used |
+| ROE > 15% | Quality filter | Novy-Marx (2013) quality factor |
+| Forward P/E < Trailing | Earnings growth confirmation | Implied by analyst estimates |
+| Insider buying | Information asymmetry | Lakonishok & Lee (2001) |
+
+**Weaknesses:**
+| Issue | Problem | Mitigation |
+|-------|---------|------------|
+| Analyst targets are biased | Sell-side analysts have conflicts | Use as relative ranking, not absolute |
+| PEG ignores balance sheet | High-growth + high-debt is risky | Added debt/equity check |
+| Reddit/Trends are noise | Retail sentiment is unreliable | Low weight (1 pt max), treat as curiosity |
+| No momentum factor | Missing proven alpha source | Could add RSI/price momentum in v2 |
+
+**Recommendation:** The scoring is reasonable for a free tool. Institutional traders wouldn't use it as-is, but sophisticated retail investors could use it as a first-pass screener before doing their own research.
+
+### Is Daily/Hourly Cadence Sustainable?
+
+**Yes, but with careful rate limiting.**
+
+| Source | Rate Limit | Sustainable Cadence | Notes |
+|--------|------------|---------------------|-------|
+| Finviz (finvizfinance) | ~100 pages/min | 1x daily | 4 screens × ~20 pages each = ~2 min |
+| yfinance | ~2000/hour | 50 tickers hourly | 1.5s delay between tickers |
+| Google Trends | ~10-20/hour | Skip or 1x daily | Very aggressive rate limiting |
+| Reddit (PRAW) | 60 req/min | 50 tickers hourly | With proper OAuth |
+| SEC EDGAR | 10 req/sec | 50 tickers hourly | Must include User-Agent |
+| OpenInsider | Unknown | 1x daily | Be conservative |
+| RSS feeds | Unlimited | Hourly | Most reliable source |
+
+**Recommended cadence:**
+```
+Discovery (python discover.py):  1x daily at 6 AM
+  - Finviz screens: 4 screens, ~5 min total
+  - OpenInsider: 1 request
+  - Output: Cached watchlist for the day
+
+Scan (python main.py):           Hourly during market hours
+  - 50 tickers × 5 sources = ~250 API calls
+  - With 1.5s delays = ~6 min per scan
+  - Skip Google Trends (rate limited) or sample 10 tickers
+```
+
+**Google Trends caveat:** The pytrends library gets 429 errors aggressively. Either:
+1. Skip it entirely (sentiment from Reddit/news is sufficient)
+2. Only check top 10 scoring tickers
+3. Use daily cadence only
+
+### Would Real Traders Use This?
+
+**Retail traders:** Yes, if they understand the limitations. This is comparable to free Finviz screeners but with automated monitoring and Telegram alerts.
+
+**Professional traders:** No. They have:
+- Bloomberg Terminal ($24K/year) with real-time data
+- FactSet/Capital IQ with standardized financials
+- Alternative data feeds (satellite imagery, credit card data)
+- Execution algorithms and dark pool access
+
+**This tool's niche:** Sophisticated retail investors who:
+- Want to systematically screen the market
+- Don't trust Reddit/Discord stock tips
+- Can't afford professional tools
+- Will do their own DD after screening
+
+---
+
+## Architecture
+
+### Project Structure
 
 ```
-stock-alpha/
-├── main.py                  # Entry point, runs daily scan
-├── config.py                # All config: watchlist, thresholds
+AlphaHound/
+├── discover.py          # Discovery script — run DAILY
+├── main.py              # Scan script — run HOURLY  
+├── config.py            # Configuration (watchlist, thresholds)
+├── scoring.py           # Composite alpha scoring (max 20 pts)
+├── alerts.py            # Telegram notifications
+├── storage.py           # SQLite signal logging + prioritization
 ├── data/
-│   ├── fundamentals.py      # yfinance: price targets, P/E, PEG
-│   ├── reddit.py            # PRAW: mention velocity
-│   ├── insider.py           # SEC EDGAR: Form 4 insider trades
-│   ├── trends.py            # Google Trends: retail interest
-│   └── news.py              # RSS: headlines + figure mentions
-├── scoring/
-│   └── engine.py            # Composite alpha score computation
-├── alerts/
-│   └── telegram.py          # Telegram bot: send formatted alerts
-├── storage/
-│   └── db.py                # SQLite: signal logging
-├── requirements.txt
-└── .env                     # API keys (gitignored)
+│   ├── discovery.py     # Fundamentals-first discovery (Finviz screens)
+│   ├── fundamentals.py  # yfinance (ROE, margins, P/E, PEG, growth)
+│   ├── reddit.py        # PRAW (mention velocity)
+│   ├── insider.py       # SEC EDGAR (Form 4 insider trades)
+│   ├── trends.py        # Google Trends (retail interest)
+│   └── news.py          # RSS feeds (headlines, figure mentions)
+├── test_setup.py        # Verify all APIs work
+├── requirements.txt     # Dependencies
+└── .env                 # API keys (gitignored)
 ```
 
 ---
@@ -46,17 +142,16 @@ stock-alpha/
 ## Configuration (`config.py`)
 
 ```python
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
-
-# Watchlist: tickers to monitor
-WATCHLIST = [
+# Core watchlist: always monitored (your high-conviction names)
+CORE_WATCHLIST = [
     "NVDA", "MRVL", "MU", "AMD", "INTC", "QCOM",
     "TSLA", "AAPL", "MSFT", "GOOGL", "META", "AMZN",
     "DELL", "HPE", "SMCI", "ARM", "AVGO", "TSM",
 ]
+
+# Discovery settings
+MAX_WATCHLIST_SIZE = 100         # Max unique tickers from discovery
+MAX_HOURLY_TICKERS = 50          # Cap hourly scan (rate limit sustainable)
 
 # High-signal public figures (for news scanning)
 SIGNAL_FIGURES = [
@@ -65,20 +160,13 @@ SIGNAL_FIGURES = [
 ]
 
 # Scoring thresholds
-ANALYST_UPSIDE_MIN = 0.20          # 20% minimum analyst upside
-ALERT_SCORE_THRESHOLD = 6.0        # Composite score to trigger alert (out of 15)
-MIN_ANALYST_COUNT = 5              # Require minimum analyst coverage
+ALERT_SCORE_THRESHOLD = 10.0     # Composite score to trigger alert (out of 20)
 
-# Telegram
+# API credentials (from .env)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-
-# Reddit (free for personal use)
 REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "")
 REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
-
-# Database
-DB_PATH = "./data/alpha.db"
 ```
 
 ---
@@ -595,195 +683,231 @@ Notes:
 
 ---
 
-## Scoring Engine (`scoring/engine.py`)
+## Scoring Engine (`scoring.py`)
 
-**Function:** `score_ticker(fundamentals, reddit, insider, trends, news) -> dict | None`
+**Function:** `score_ticker(fundamentals, reddit, insider, trends, news, has_insider_buying, is_multi_screen) -> dict | None`
 
-### Score Components (max 15 points)
+### Score Components (max 20 points)
+
+The scoring is organized by investment thesis priority: Quality → Growth → Value → Catalyst → Sentiment.
 
 ```
-FUNDAMENTALS (max 8 pts)
-─────────────────────────
-1. analyst_upside_score  (0–4 pts)
-   = min(analyst_upside_pct / 0.125, 4.0)
-   # 12.5% upside = 1pt, 50%+ upside = 4pts
+QUALITY (max 5 pts) — Foundation of the investment
+──────────────────────────────────────────────────
+1. roe_score  (0–2 pts)
+   = 2.0 if ROE > 25%
+   = 1.5 if ROE > 15%
+   = 1.0 if ROE > 10%
+   = 0.0 otherwise
+   # Measures profitability efficiency
 
-2. peg_score  (0–2 pts)
-   = 2.0 if peg_ratio < 1.0 (undervalued growth)
-   = 1.0 if peg_ratio < 1.5
+2. margin_score  (0–1.5 pts)
+   = 1.5 if profit_margin > 20%
+   = 1.0 if profit_margin > 10%
+   = 0.0 otherwise
+   # High margins = pricing power
+
+3. debt_score  (0–1.5 pts)
+   = 1.5 if debt/equity < 0.5
+   = 1.0 if debt/equity < 1.0
+   = 0.5 if debt/equity < 1.5
+   = 0.0 otherwise
+   # Low leverage = financial stability
+
+GROWTH (max 4 pts) — Future earnings power
+──────────────────────────────────────────
+4. eps_growth_score  (0–2 pts)
+   = 2.0 if EPS growth next year > 20% (triggers "high_growth")
+   = 1.0 if EPS growth next year > 10%
    = 0.0 otherwise
 
-3. analyst_coverage_score  (0–1 pt)
-   = 1.0 if analyst_count >= 10
-
-4. position_in_range_score  (0–1 pt)
-   = 1.0 if in bottom 40% of 52w range
-
-ALTERNATIVE DATA (max 7 pts)
-─────────────────────────────
-5. insider_score  (0–2 pts)
-   = 2.0 if insider signal is "bullish" (cluster buying)
+5. pe_discount_score  (0–2 pts) — KEY GARP SIGNAL
+   = 2.0 if Forward P/E is 30%+ below Trailing P/E (triggers "pe_compression")
+   = 1.0 if Forward P/E is 15%+ below Trailing P/E
+   = 0.5 if Forward P/E < Trailing P/E
    = 0.0 otherwise
-   # Strongest predictive signal
+   # This is the core GARP signal — market hasn't priced in growth
 
-6. reddit_score  (0–1.5 pts)
-   = 1.5 if velocity_ratio > 2.0 (mention spike)
-   = 0.5 if velocity_ratio > 1.5
+VALUE (max 4 pts) — Reasonable entry price
+──────────────────────────────────────────
+6. peg_score  (0–2 pts)
+   = 2.0 if PEG < 0.5 (triggers "deep_value_peg")
+   = 1.5 if PEG < 1.0
+   = 1.0 if PEG < 1.5
+   = 0.5 if PEG < 2.0
    = 0.0 otherwise
 
-7. trends_score  (0–1.5 pts)
-   = 1.5 if trend_ratio > 2.0 (Google interest spike)
-   = 0.5 if trend_ratio > 1.5
+7. analyst_upside_score  (0–2 pts)
+   = 2.0 if analyst upside > 30%
+   = 1.0 if analyst upside > 15%
+   = 0.5 if analyst upside > 5%
    = 0.0 otherwise
 
-8. news_score  (0–2 pts)
-   = 2.0 if figure_mention detected (Jensen, Buffett, etc.)
-   = 0.5 if any news in last 24h
+CATALYST (max 4 pts) — Confirmation signals (BONUS, not filter)
+───────────────────────────────────────────────────────────────
+8. insider_api_score  (0–2 pts)
+   = 2.0 if insider signal is "bullish" from SEC EDGAR (triggers "insider_buying")
    = 0.0 otherwise
 
-composite_score = sum of all components (max 15)
+9. insider_discovery_score  (0–1 pt)
+   = 1.0 if discovered via Finviz/OpenInsider insider screen
+   # Bonus for being in insider buying screen
+
+10. multi_screen_score  (0–1 pt)
+    = 1.0 if appeared in 2+ fundamental screens (triggers "multi_screen_conviction")
+    # Highest conviction — multiple independent signals
+
+SENTIMENT (max 3 pts) — Alternative data confirmation
+─────────────────────────────────────────────────────
+11. reddit_score  (0–1 pt)
+    = 1.0 if velocity_ratio > 2.0 (triggers "reddit_spike")
+    = 0.5 if velocity_ratio > 1.5
+    = 0.0 otherwise
+
+12. trends_score  (0–1 pt)
+    = 1.0 if trend_ratio > 2.0 (triggers "google_trends_spike")
+    = 0.5 if trend_ratio > 1.5
+    = 0.0 otherwise
+    # Note: Google Trends has aggressive rate limits
+
+13. news_score  (0–1 pt)
+    = 1.0 if figure_mention detected (triggers "figure_mention:NAME")
+    = 0.5 if any news in last 24h
+    = 0.0 otherwise
+
+composite_score = sum of all components (max 20)
 ```
 
-Returns:
+### Why This Weighting?
+
+| Category | Weight | Rationale |
+|----------|--------|-----------|
+| Quality | 5 pts (25%) | Foundation — bad businesses don't become good investments |
+| Growth | 4 pts (20%) | Forward-looking — we want improving earnings |
+| Value | 4 pts (20%) | Entry price matters for returns |
+| Catalyst | 4 pts (20%) | Confirmation that others see the opportunity |
+| Sentiment | 3 pts (15%) | Weakest signal — treat as curiosity, not conviction |
+
+### Alert Thresholds
+
+```python
+# Recommended thresholds
+ALERT_SCORE_THRESHOLD = 10.0   # Score to trigger alert (out of 20)
+MIN_QUALITY_SCORE = 2.0        # Minimum Quality component to qualify
+
+# Alert triggers (fire regardless of score)
+# - "high_growth" (EPS growth > 20%)
+# - "pe_compression" (Forward P/E 30%+ below Trailing)
+# - "insider_buying" (SEC EDGAR bullish signal)
+# - "multi_screen_conviction" (appeared in 2+ screens)
+```
+
+### Example Output
+
 ```python
 {
-    "ticker": "MRVL",
-    "composite_score": 11.5,
+    "ticker": "MU",
+    "composite_score": 15.5,
     "score_breakdown": {
-        "analyst_upside": 3.2,
-        "peg": 2.0,
-        "analyst_coverage": 1.0,
-        "position_in_range": 1.0,
-        "insider": 2.0,
-        "reddit": 1.5,
+        "roe": 2.0,           # 39.8% ROE
+        "margin": 1.5,        # 41.5% profit margin
+        "debt": 1.5,          # 0.15 D/E
+        "eps_growth": 2.0,    # 74% EPS growth next year
+        "pe_discount": 2.0,   # Forward 9.7 vs Trailing 47
+        "peg": 2.0,           # PEG 0.08
+        "analyst_upside": 0.0,# Target below current (analysts late)
+        "insider_api": 0.0,   # No recent insider buying
+        "insider_discovery": 0.0,
+        "multi_screen": 1.0,  # In Quality Growth AND Undervalued Growth
+        "reddit": 0.5,
         "trends": 0.5,
-        "news": 2.0,
+        "news": 0.5,
     },
-    "signals": {
-        "fundamentals": { ... },
-        "reddit": { ... },
-        "insider": { ... },
-        "trends": { ... },
-        "news": { ... },
-    },
-    "alert_triggers": ["insider_buying", "figure_mention:Jensen Huang", "reddit_spike"],
-    "scored_at": "2025-01-15T14:45:00",
+    "alert_triggers": ["high_growth", "pe_compression", "deep_value_peg", "multi_screen_conviction"],
+    "scored_at": "2026-06-04T19:45:00",
 }
-```
-
-Implementation:
-```python
-from datetime import datetime
-
-def score_ticker(
-    fundamentals: dict,
-    reddit: dict = None,
-    insider: dict = None,
-    trends: dict = None,
-    news: dict = None,
-) -> dict | None:
-    """Score a ticker using all available signals."""
-    if not fundamentals:
-        return None
-    
-    f = fundamentals
-    breakdown = {}
-    triggers = []
-    
-    # === FUNDAMENTALS (max 8 pts) ===
-    
-    # 1. Analyst upside (0-4 pts)
-    upside = f.get("analyst_upside_pct", 0)
-    breakdown["analyst_upside"] = min(upside / 0.125, 4.0) if upside > 0 else 0.0
-    
-    # 2. PEG ratio (0-2 pts)
-    peg = f.get("peg_ratio")
-    if peg and 0 < peg < 1.0:
-        breakdown["peg"] = 2.0
-    elif peg and 0 < peg < 1.5:
-        breakdown["peg"] = 1.0
-    else:
-        breakdown["peg"] = 0.0
-    
-    # 3. Analyst coverage (0-1 pt)
-    breakdown["analyst_coverage"] = 1.0 if f.get("analyst_count", 0) >= 10 else 0.0
-    
-    # 4. Position in 52w range (0-1 pt)
-    low, high, current = f.get("52w_low"), f.get("52w_high"), f.get("current_price")
-    if low and high and current and high > low:
-        range_pos = (current - low) / (high - low)
-        breakdown["position_in_range"] = 1.0 if range_pos < 0.4 else 0.0
-    else:
-        breakdown["position_in_range"] = 0.0
-    
-    # === ALTERNATIVE DATA (max 7 pts) ===
-    
-    # 5. Insider trading (0-2 pts) — strongest signal
-    breakdown["insider"] = 0.0
-    if insider and insider.get("signal") == "bullish":
-        breakdown["insider"] = 2.0
-        triggers.append("insider_buying")
-    
-    # 6. Reddit velocity (0-1.5 pts)
-    breakdown["reddit"] = 0.0
-    if reddit:
-        vel = reddit.get("velocity_ratio", 0)
-        if vel > 2.0:
-            breakdown["reddit"] = 1.5
-            triggers.append("reddit_spike")
-        elif vel > 1.5:
-            breakdown["reddit"] = 0.5
-    
-    # 7. Google Trends (0-1.5 pts)
-    breakdown["trends"] = 0.0
-    if trends:
-        ratio = trends.get("trend_ratio", 0)
-        if ratio > 2.0:
-            breakdown["trends"] = 1.5
-            triggers.append("google_trends_spike")
-        elif ratio > 1.5:
-            breakdown["trends"] = 0.5
-    
-    # 8. News / figure mentions (0-2 pts)
-    breakdown["news"] = 0.0
-    if news:
-        if news.get("has_figure_mention"):
-            breakdown["news"] = 2.0
-            triggers.append(f"figure_mention:{news.get('figure_mentioned')}")
-        elif news.get("news_count_24h", 0) > 0:
-            breakdown["news"] = 0.5
-    
-    return {
-        "ticker": f["ticker"],
-        "composite_score": round(sum(breakdown.values()), 2),
-        "score_breakdown": breakdown,
-        "signals": {
-            "fundamentals": fundamentals,
-            "reddit": reddit,
-            "insider": insider,
-            "trends": trends,
-            "news": news,
-        },
-        "alert_triggers": triggers,
-        "scored_at": datetime.now().isoformat(),
-    }
-
-
-def rank_watchlist(scores: list[dict]) -> list[dict]:
-    """Filter and rank scored tickers."""
-    from config import ANALYST_UPSIDE_MIN, MIN_ANALYST_COUNT
-    
-    filtered = [
-        s for s in scores
-        if s and s["signals"]["fundamentals"].get("analyst_upside_pct", 0) >= ANALYST_UPSIDE_MIN
-        and s["signals"]["fundamentals"].get("analyst_count", 0) >= MIN_ANALYST_COUNT
-    ]
-    return sorted(filtered, key=lambda x: x["composite_score"], reverse=True)
 ```
 
 ---
 
-## Alerts (`alerts/telegram.py`)
+## Discovery Engine (`data/discovery.py`)
+
+The discovery module finds new stock candidates using Finviz multi-factor screens.
+
+### Discovery Screens
+
+```
+SCREEN 1: Quality Growth (GARP) — Primary Screen
+────────────────────────────────────────────────
+Filters:
+  Market Cap > $2B
+  PEG < 2
+  ROE > 15%
+  EPS growth next year > 0%
+  Avg Volume > 500K
+
+Expected results: 300-400 stocks
+Would catch: MU, NVDA, GOOGL, ADBE
+
+SCREEN 2: Undervalued Growth — Secondary Screen
+───────────────────────────────────────────────
+Filters:
+  Market Cap > $2B
+  PEG < 1 (deep value)
+  Analyst Recommendation: Buy or better
+  Avg Volume > 500K
+
+Expected results: 400-500 stocks
+
+SCREEN 3: Quality Value — Tertiary Screen
+─────────────────────────────────────────
+Filters:
+  Market Cap > $2B
+  Debt/Equity < 1
+  Operating Margin > 0%
+  P/E < 25
+  Analyst Recommendation: Buy or better
+  Avg Volume > 300K
+
+Expected results: 300-400 stocks
+
+BONUS: Insider Buying (tracked, not filtered)
+─────────────────────────────────────────────
+Finviz: InsiderTransactions > 0%
+OpenInsider: 2+ insider purchases in 14 days
+
+These stocks get +1 pt in scoring, but aren't filtered out if missing.
+```
+
+### Multi-Screen Overlap (Highest Conviction)
+
+Stocks appearing in 2+ screens are flagged as "multi-screen" and get +1 pt bonus.
+
+```python
+# Example discovery results
+{
+    "tickers": ["AAPL", "NVDA", "MU", "GOOGL", ...],  # Final watchlist
+    "multi_screen": {"MU", "NVDA", "ADBE", ...},      # Highest conviction
+    "insider_tickers": {"AIG", "XYZ", ...},           # For scoring bonus
+}
+```
+
+### Caching
+
+Discovery results are cached to `data/watchlist_cache.json` for hourly scans:
+
+```json
+{
+    "updated_at": "2026-06-04T06:00:00",
+    "tickers": ["AAPL", "NVDA", "MU", ...],
+    "insider_tickers": ["AIG", "XYZ"],
+    "multi_screen": ["MU", "NVDA", "ADBE"]
+}
+```
+
+---
+
+## Alerts (`alerts.py`)
 
 **Function:** `send_alert(score: dict) -> bool`
 
@@ -791,628 +915,121 @@ Sends a Telegram message when `composite_score >= ALERT_SCORE_THRESHOLD` or high
 
 Message format:
 ```
-🔔 MRVL — Score: 11.5/15
+*MU* — Score: 15.5/20
 
-📊 Fundamentals (7.2 pts)
-   Analyst: +40% upside ($79 → $111), 28 analysts
-   PEG: 0.9 (undervalued), near 52w low
-
-⚡ Triggers
-   • Insider buying detected
-   • Figure mention: Jensen Huang
-   • Reddit 2.3x mention spike
-
-📈 Alt Data: insider=2.0, reddit=1.5, trends=0.5, news=2.0
-```
-
-Implementation:
-```python
-import requests
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-
-def send_telegram(message: str) -> bool:
-    """Send a message via Telegram bot. Returns True on success."""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram not configured, skipping alert")
-        return False
-    
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    try:
-        resp = requests.post(url, json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": "Markdown",
-        }, timeout=10)
-        return resp.status_code == 200
-    except Exception as e:
-        print(f"Telegram error: {e}")
-        return False
-
-
-def send_alert(score: dict) -> bool:
-    """Format and send alert for a high-scoring ticker."""
-    f = score["signals"]["fundamentals"]
-    b = score["score_breakdown"]
-    triggers = score.get("alert_triggers", [])
-    
-    # Build trigger list
-    trigger_lines = ""
-    if triggers:
-        trigger_lines = "\n⚡ *Triggers*\n" + "\n".join(f"   • {t}" for t in triggers)
-    
-    fundamental_pts = b["analyst_upside"] + b["peg"] + b["analyst_coverage"] + b["position_in_range"]
-    alt_pts = b["insider"] + b["reddit"] + b["trends"] + b["news"]
-    
-    msg = f"""🔔 *{score['ticker']}* — Score: {score['composite_score']:.1f}/15
-
-📊 *Fundamentals* ({fundamental_pts:.1f} pts)
-   Analyst: +{f['analyst_upside_pct']*100:.0f}% upside (${f['current_price']:.0f} → ${f['analyst_target_mean']:.0f})
-   PEG: {f.get('peg_ratio', 'N/A')}, {f.get('analyst_count', 0)} analysts
-{trigger_lines}
-
-📈 Alt data: insider={b['insider']:.1f}, reddit={b['reddit']:.1f}, trends={b['trends']:.1f}, news={b['news']:.1f}"""
-    
-    return send_telegram(msg)
-
-
-def send_daily_digest(scores: list[dict]) -> bool:
-    """Send daily digest of top tickers."""
-    if not scores:
-        return send_telegram("📋 Daily digest: No qualifying tickers today.")
-    
-    lines = ["📋 *Daily Alpha Digest*\n"]
-    for s in scores[:5]:
-        f = s["signals"]["fundamentals"]
-        triggers = s.get("alert_triggers", [])
-        trigger_str = f" ⚡{len(triggers)}" if triggers else ""
-        lines.append(f"• *{s['ticker']}* — {s['composite_score']:.1f}/15 (+{f['analyst_upside_pct']*100:.0f}%){trigger_str}")
-    
-    return send_telegram("\n".join(lines))
+Quality: 5.0/5 | Growth: 4.0/4 | Value: 2.0/4
+Price: $108.42 -> $145.00 (+34%)
+PEG: 0.08 | Analysts: 31
+[triggers] high_growth, pe_compression, deep_value_peg
 ```
 
 ---
 
-## Storage (`storage/db.py`)
+## Storage (`storage.py`)
 
-SQLite database at `./data/alpha.db`. Minimal schema for MVP.
-
-### Tables
-
-**`signals`** — every scored ticker instance (for backtesting)
-```sql
-CREATE TABLE IF NOT EXISTS signals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ticker TEXT NOT NULL,
-    composite_score REAL,
-    analyst_upside_pct REAL,
-    current_price REAL,
-    target_price REAL,
-    peg_ratio REAL,
-    analyst_count INTEGER,
-    scored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_signals_ticker ON signals(ticker);
-CREATE INDEX IF NOT EXISTS idx_signals_scored_at ON signals(scored_at);
-```
-
-Implementation:
-```python
-import sqlite3
-from contextlib import contextmanager
-from config import DB_PATH
-
-@contextmanager
-def get_db():
-    """Context manager for database connections."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
-def init_db():
-    """Create tables if they don't exist."""
-    with get_db() as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS signals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL,
-                composite_score REAL,
-                analyst_upside_pct REAL,
-                current_price REAL,
-                target_price REAL,
-                peg_ratio REAL,
-                analyst_count INTEGER,
-                scored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE INDEX IF NOT EXISTS idx_signals_ticker ON signals(ticker);
-            CREATE INDEX IF NOT EXISTS idx_signals_scored_at ON signals(scored_at);
-        """)
-        conn.commit()
-
-
-def log_signal(score: dict):
-    """Insert a scored signal into the database."""
-    f = score["fundamentals"]
-    with get_db() as conn:
-        conn.execute("""
-            INSERT INTO signals (ticker, composite_score, analyst_upside_pct, 
-                                 current_price, target_price, peg_ratio, analyst_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            score["ticker"],
-            score["composite_score"],
-            f.get("analyst_upside_pct"),
-            f.get("current_price"),
-            f.get("analyst_target_mean"),
-            f.get("peg_ratio"),
-            f.get("analyst_count"),
-        ))
-        conn.commit()
-
-
-def get_signal_history(ticker: str, days: int = 30) -> list[dict]:
-    """Get historical signals for backtesting."""
-    with get_db() as conn:
-        rows = conn.execute("""
-            SELECT * FROM signals 
-            WHERE ticker = ? AND scored_at > datetime('now', ?)
-            ORDER BY scored_at DESC
-        """, (ticker, f'-{days} days')).fetchall()
-        return [dict(r) for r in rows]
-```
+SQLite database at `./data/alpha.db` for signal logging and backtesting.
 
 ---
 
-## Main Entry Point (`main.py`)
+## Main Entry Points
 
-Simple script that runs once per invocation. Schedule via cron or Windows Task Scheduler.
-
-```python
-#!/usr/bin/env python3
-"""Stock Alpha Scanner - Run daily via cron."""
-
-import time
-from data.fundamentals import get_fundamentals
-from data.reddit import get_reddit_sentiment
-from data.insider import get_insider_trades
-from data.trends import get_search_trends
-from data.news import get_news_for_ticker
-from scoring.engine import score_ticker, rank_watchlist
-from alerts.telegram import send_alert, send_daily_digest
-from storage.db import init_db, log_signal
-from config import WATCHLIST, ALERT_SCORE_THRESHOLD
-
-
-def main():
-    print(f"Scanning {len(WATCHLIST)} tickers...")
-    init_db()
-    
-    scores = []
-    for ticker in WATCHLIST:
-        print(f"  {ticker}...", end=" ", flush=True)
-        
-        # Fetch all data sources
-        fundamentals = get_fundamentals(ticker)
-        if not fundamentals:
-            print("fetch failed")
-            continue
-        
-        reddit = get_reddit_sentiment(ticker)
-        insider = get_insider_trades(ticker)
-        trends = get_search_trends(ticker)
-        news = get_news_for_ticker(ticker)
-        
-        # Score with all signals
-        score = score_ticker(fundamentals, reddit, insider, trends, news)
-        if score:
-            scores.append(score)
-            log_signal(score)
-            triggers = score.get("alert_triggers", [])
-            trigger_str = f" ⚡{','.join(triggers)}" if triggers else ""
-            print(f"score={score['composite_score']:.1f}/15{trigger_str}")
-        else:
-            print("insufficient data")
-        
-        time.sleep(1.0)  # Rate limit (be nice to free APIs)
-    
-    # Rank and filter
-    ranked = rank_watchlist(scores)
-    
-    # Print leaderboard
-    print(f"\n{'='*60}")
-    print(f"TOP TICKERS (score >= {ALERT_SCORE_THRESHOLD})")
-    print(f"{'='*60}")
-    for s in ranked[:10]:
-        f = s["signals"]["fundamentals"]
-        triggers = s.get("alert_triggers", [])
-        trigger_str = f" ⚡{len(triggers)}" if triggers else ""
-        print(f"{s['ticker']:6} | {s['composite_score']:5.1f}/15 | +{f['analyst_upside_pct']*100:4.0f}% upside{trigger_str}")
-    
-    # Send alerts for high scorers or triggered signals
-    for s in ranked:
-        if s["composite_score"] >= ALERT_SCORE_THRESHOLD or s.get("alert_triggers"):
-            send_alert(s)
-    
-    # Send daily digest
-    send_daily_digest(ranked)
-    
-    print(f"\nDone. Processed {len(scores)} tickers, {len(ranked)} qualified.")
-
-
-if __name__ == "__main__":
-    main()
-```
-
-### Running
-
-**Manual:**
-```bash
-python main.py
-```
-
-**Daily via cron (Linux/Mac):**
-```bash
-# Run at 9am every weekday
-0 9 * * 1-5 cd /path/to/stock-alpha && python main.py >> logs/scan.log 2>&1
-```
-
-**Daily via Task Scheduler (Windows):**
-- Action: Start a program
-- Program: `python`
-- Arguments: `main.py`
-- Start in: `C:\path\to\stock-alpha`
-
----
-
-## Setup
-
-### Prerequisites
-
-- **Python 3.10+** installed ([download](https://www.python.org/downloads/))
-- **Telegram account** (for receiving alerts)
-- **Reddit account** (for sentiment API access)
-- **~10 minutes** to set up all credentials
-
----
-
-### Step 1: Create project structure
+### `discover.py` — Daily Discovery (6 AM)
 
 ```bash
-# Create project directory
-mkdir stock-alpha && cd stock-alpha
-
-# Create subdirectories
-mkdir -p data logs
-
-# Create Python package structure
-mkdir -p data scoring alerts storage
-touch data/__init__.py scoring/__init__.py alerts/__init__.py storage/__init__.py
-
-# Create empty files (you'll fill these from the design doc)
-touch config.py main.py
-touch data/fundamentals.py data/reddit.py data/insider.py data/trends.py data/news.py
-touch scoring/engine.py
-touch alerts/telegram.py
-touch storage/db.py
+python discover.py
 ```
 
----
+Runs Finviz screens, caches results for hourly scans.
 
-### Step 2: Create `.env` file
+### `main.py` — Hourly Scan
 
-Create a file named `.env` in the project root (**do not commit this file**):
-
-```env
-# === REQUIRED ===
-
-# Telegram Bot (for receiving alerts)
-TELEGRAM_BOT_TOKEN=your_bot_token_here
-TELEGRAM_CHAT_ID=your_chat_id_here
-
-# Reddit API (for sentiment tracking)
-REDDIT_CLIENT_ID=your_client_id_here
-REDDIT_CLIENT_SECRET=your_client_secret_here
-```
-
-Add `.env` to `.gitignore`:
 ```bash
-echo ".env" >> .gitignore
-echo "data/alpha.db" >> .gitignore
-echo "logs/" >> .gitignore
+python main.py              # Scan top 50 prioritized tickers
+python main.py --scan-all   # Scan ALL discovered tickers (for first run/weekends)
+python main.py --core-only  # Use core watchlist only
 ```
 
----
+Prioritization order: core watchlist → new discoveries → top scorers → multi-screen → insider.
 
-### Step 3: Get API credentials
-
-#### 🤖 Telegram Bot — ~2 minutes
-
-| What you need | Where it goes |
-|---------------|---------------|
-| Bot token | `TELEGRAM_BOT_TOKEN` |
-| Your chat ID | `TELEGRAM_CHAT_ID` |
-
-**Steps:**
-
-1. Open Telegram and search for **@BotFather**
-2. Send `/newbot`
-3. Follow the prompts to choose a name (e.g., "Stock Alpha Bot")
-4. BotFather replies with a token like:
-   ```
-   110201543:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw
-   ```
-5. Copy this token to `.env` as `TELEGRAM_BOT_TOKEN`
-
-**Find your chat ID:**
-
-6. Open your new bot in Telegram and send it any message (e.g., "hello")
-7. Open this URL in your browser (replace `<TOKEN>` with your actual token):
-   ```
-   https://api.telegram.org/bot<TOKEN>/getUpdates
-   ```
-8. Look for `"chat":{"id":123456789}` in the response
-9. Copy the number (e.g., `123456789`) to `.env` as `TELEGRAM_CHAT_ID`
+Scans tickers, scores, alerts on triggers.
 
 ---
 
-#### 🔴 Reddit API — ~3 minutes
+## Setup Instructions
 
-| What you need | Where it goes |
-|---------------|---------------|
-| Client ID | `REDDIT_CLIENT_ID` |
-| Client Secret | `REDDIT_CLIENT_SECRET` |
+### 1. Install Dependencies
 
-**Steps:**
-
-1. Go to https://www.reddit.com/prefs/apps (log in if needed)
-2. Scroll to the bottom, click **"create another app..."**
-3. Fill in the form:
-   - **name**: `stock-alpha-scanner`
-   - **App type**: Select **script** ✅
-   - **description**: (leave blank)
-   - **about url**: (leave blank)
-   - **redirect uri**: `http://localhost:8080` (required but not used)
-4. Click **"create app"**
-5. Find your credentials:
-   ```
-   stock-alpha-scanner
-   personal use script
-   ─────────────────────
-   Ab3_xyzABC123def    ← This is your CLIENT_ID
-   
-   secret: Gh7_secretKeyHere123   ← This is your CLIENT_SECRET
-   ```
-6. Copy both to `.env`
-
----
-
-#### ✅ No credentials needed
-
-These sources are completely free with no signup:
-
-| Source | Notes |
-|--------|-------|
-| **yfinance** | Unofficial Yahoo Finance wrapper — just works |
-| **SEC EDGAR** | US government public API |
-| **Google Trends** | Unofficial API via `pytrends` |
-| **RSS Feeds** | Public feeds from Yahoo Finance, CNBC, Reuters, etc. |
-
----
-
-### Step 4: Install dependencies
-
-Create `requirements.txt`:
-```
-yfinance>=0.2.36
-requests>=2.31.0
-python-dotenv>=1.0.0
-praw>=7.7.1
-pytrends>=4.9.0
-feedparser>=6.0.10
-```
-
-Install:
 ```bash
 pip install -r requirements.txt
 ```
 
----
+### 2. Configure Credentials
 
-### Step 5: Test the setup
-
-Create a quick test script `test_setup.py`:
-
-```python
-#!/usr/bin/env python3
-"""Test that all APIs are working."""
-
-import os
-from dotenv import load_dotenv
-load_dotenv()
-
-print("Testing setup...\n")
-
-# 1. Test environment variables
-print("1. Checking .env variables...")
-required = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET"]
-missing = [v for v in required if not os.getenv(v)]
-if missing:
-    print(f"   ❌ Missing: {missing}")
-else:
-    print("   ✅ All environment variables set")
-
-# 2. Test yfinance
-print("\n2. Testing yfinance...")
-try:
-    import yfinance as yf
-    ticker = yf.Ticker("AAPL")
-    price = ticker.info.get("currentPrice")
-    print(f"   ✅ yfinance working (AAPL: ${price})")
-except Exception as e:
-    print(f"   ❌ yfinance error: {e}")
-
-# 3. Test Reddit
-print("\n3. Testing Reddit API...")
-try:
-    import praw
-    reddit = praw.Reddit(
-        client_id=os.getenv("REDDIT_CLIENT_ID"),
-        client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
-        user_agent="stock-alpha-test/1.0"
-    )
-    sub = reddit.subreddit("stocks")
-    post = next(sub.hot(limit=1))
-    print(f"   ✅ Reddit working (top post: {post.title[:50]}...)")
-except Exception as e:
-    print(f"   ❌ Reddit error: {e}")
-
-# 4. Test Telegram
-print("\n4. Testing Telegram...")
-try:
-    import requests
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    resp = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=5)
-    if resp.status_code == 200:
-        bot_name = resp.json()["result"]["username"]
-        print(f"   ✅ Telegram working (bot: @{bot_name})")
-    else:
-        print(f"   ❌ Telegram error: {resp.text}")
-except Exception as e:
-    print(f"   ❌ Telegram error: {e}")
-
-# 5. Test pytrends
-print("\n5. Testing Google Trends...")
-try:
-    from pytrends.request import TrendReq
-    pytrends = TrendReq()
-    pytrends.build_payload(["AAPL stock"], timeframe="today 1-m")
-    df = pytrends.interest_over_time()
-    print(f"   ✅ Google Trends working ({len(df)} data points)")
-except Exception as e:
-    print(f"   ❌ Google Trends error: {e}")
-
-# 6. Test RSS
-print("\n6. Testing RSS feeds...")
-try:
-    import feedparser
-    feed = feedparser.parse("https://finance.yahoo.com/news/rssindex")
-    if feed.entries:
-        print(f"   ✅ RSS working ({len(feed.entries)} articles)")
-    else:
-        print("   ⚠️  RSS feed empty (may be temporary)")
-except Exception as e:
-    print(f"   ❌ RSS error: {e}")
-
-print("\n" + "="*50)
-print("Setup complete! Run 'python main.py' to start scanning.")
+```bash
+cp .env.example .env
+# Edit .env with your credentials
 ```
 
-Run it:
+Required:
+- **Telegram**: Message @BotFather → `/newbot` → get token
+- **Reddit**: https://reddit.com/prefs/apps → Create "script" app
+
+Optional (work without auth):
+- yfinance, SEC EDGAR, RSS, Finviz
+
+### 3. Test Setup
+
 ```bash
 python test_setup.py
 ```
 
-Expected output:
-```
-Testing setup...
-
-1. Checking .env variables...
-   ✅ All environment variables set
-
-2. Testing yfinance...
-   ✅ yfinance working (AAPL: $198.5)
-
-3. Testing Reddit API...
-   ✅ Reddit working (top post: Daily Discussion Thread...)
-
-4. Testing Telegram...
-   ✅ Telegram working (bot: @YourStockAlphaBot)
-
-5. Testing Google Trends...
-   ✅ Google Trends working (30 data points)
-
-6. Testing RSS feeds...
-   ✅ RSS working (20 articles)
-
-==================================================
-Setup complete! Run 'python main.py' to start scanning.
-```
-
----
-
-### Step 6: Run the scanner
+### 4. Run
 
 ```bash
+# Daily discovery
+python discover.py
+
+# Hourly scan
 python main.py
 ```
 
 ---
 
-### Step 7: Schedule daily runs (optional)
+## Scheduling
 
-**Linux/Mac (cron):**
+### Linux/Mac (cron)
+
 ```bash
-crontab -e
+# Discovery: Daily at 6am PT
+0 6 * * 1-5 cd /path/to/AlphaHound && python discover.py >> logs/discover.log 2>&1
 
-# Add: Run at 6:00 AM Pacific (market opens 6:30 AM PT)
-0 6 * * 1-5 cd /path/to/stock-alpha && python main.py >> logs/scan.log 2>&1
+# Scan: Hourly during market hours
+30 6-13 * * 1-5 cd /path/to/AlphaHound && python main.py >> logs/scan.log 2>&1
 ```
 
-**Windows (Task Scheduler):**
-1. Open Task Scheduler → **Create Basic Task**
-2. Name: "Stock Alpha Scanner"
-3. Trigger: **Daily** at 6:00 AM
-4. Action: **Start a program**
-   - Program: `C:\Python310\python.exe` (adjust path)
-   - Arguments: `main.py`
-   - Start in: `C:\path\to\stock-alpha`
+### Windows (Task Scheduler)
+
+| Task | Trigger | Action |
+|------|---------|--------|
+| AlphaHound Discovery | Daily 6:00 AM, weekdays | `python discover.py` |
+| AlphaHound Scan | Hourly 6:30 AM-1 PM, weekdays | `python main.py` |
 
 ---
 
-### Troubleshooting
+## Known Limitations
 
-| Error | Cause | Solution |
-|-------|-------|----------|
-| `KeyError: TELEGRAM_BOT_TOKEN` | `.env` file missing or not loaded | Ensure `.env` exists in project root |
-| `prawcore.exceptions.ResponseException: 401` | Invalid Reddit credentials | Regenerate client secret at reddit.com/prefs/apps |
-| `prawcore.exceptions.OAuthException` | Wrong app type | Delete app, recreate as **script** type |
-| `yfinance: No price data found` | Ticker delisted or no coverage | Remove ticker from watchlist |
-| `pytrends: 429 Too Many Requests` | Rate limited by Google | Increase delay to 2-3s between tickers |
-| `Telegram: chat not found` | Wrong chat ID | Re-send message to bot, check getUpdates again |
+1. **Google Trends rate limits** — May get 429 errors. Consider skipping or using daily only.
+2. **yfinance is unofficial** — May break if Yahoo changes their site.
+3. **Analyst targets are biased** — Sell-side analysts have conflicts. Use as relative ranking.
+4. **No momentum factor** — Could add RSI/price momentum in v2.
+5. **No position sizing** — This is screening, not portfolio construction.
 
 ---
 
-## Error Handling
+## Future Enhancements (v2)
 
-- All data fetchers return `None` on error — never crash the main loop
-- `score_ticker()` handles missing signals gracefully (treats as 0 pts)
-- `send_telegram()` catches network errors and logs them
-- Rate limiting: 1s delay between tickers (be nice to free APIs)
-- All errors print to stdout (redirect to log file via cron)
-- pytrends/yfinance are unofficial — may break if upstream sites change
-
----
-
-## Future Extensions (post-MVP)
-
-1. **Backtesting module** — Query `signals` table to measure whether high-score signals predicted actual price gains at 30/60/90 day windows
-
-2. **Streamlit dashboard** — Visual leaderboard if you want a UI:
-   - Table with color-coded scores
-   - Historical score charts per ticker
-   - ~50 lines of code with `streamlit`
-
-3. **13F institutional tracking** — Parse quarterly 13F filings to see what Buffett/institutions bought (45-day delay, less actionable than Form 4)
-
-4. **Twitter/X Basic tier** — If you want real-time tweets, $100/month gets 7-day search
-
-5. **Score decay** — Time-weight signals (recent insider buys worth more than 60-day-old ones)
-
-6. **Watchlist expansion** — Screen all S&P 500 instead of fixed list
-
-7. **Options flow** — Unusual options activity from CBOE RSS feeds
+- [ ] Add momentum factor (RSI, 6-month price performance)
+- [ ] Backtest scoring thresholds against historical returns
+- [ ] Add exit signals (trailing stop, target hit, degrading fundamentals)
+- [ ] Discord alerts as alternative to Telegram
+- [ ] Web dashboard for viewing results

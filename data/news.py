@@ -3,13 +3,13 @@
 import re
 import feedparser
 from datetime import datetime, timedelta
-from config import WATCHLIST, SIGNAL_FIGURES, RSS_FEEDS
+from config import CORE_WATCHLIST, SIGNAL_FIGURES, RSS_FEEDS
 
 
 def scan_news(tickers: list[str] = None) -> list[dict]:
     """Scan RSS feeds for ticker mentions and figure quotes."""
     if tickers is None:
-        tickers = WATCHLIST
+        tickers = CORE_WATCHLIST
     
     ticker_pattern = re.compile(r'\b(' + '|'.join(tickers) + r')\b', re.IGNORECASE)
     figure_pattern = re.compile(r'(' + '|'.join(SIGNAL_FIGURES) + r')', re.IGNORECASE)

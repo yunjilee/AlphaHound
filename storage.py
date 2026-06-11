@@ -85,3 +85,60 @@ def get_signal_history(ticker: str, days: int = 30) -> list[dict]:
             ORDER BY scored_at DESC
         """, (ticker, f'-{days} days')).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_top_scored_tickers(limit: int = 50, hours: int = 48) -> list[tuple[str, float]]:
+    """
+    Get tickers with highest recent scores.
+    
+    Returns list of (ticker, max_score) tuples, sorted by score descending.
+    Used to prioritize hourly scans on best candidates.
+    """
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT ticker, MAX(composite_score) as max_score
+            FROM signals 
+            WHERE scored_at > datetime('now', ?)
+            GROUP BY ticker
+            ORDER BY max_score DESC
+            LIMIT ?
+        """, (f'-{hours} hours', limit)).fetchall()
+        return [(r['ticker'], r['max_score']) for r in rows]
+
+
+def get_new_tickers(tickers: list[str], hours: int = 48) -> list[str]:
+    """
+    Return tickers that have no score history in the given time window.
+    These are new discoveries that should be scanned.
+    """
+    if not tickers:
+        return []
+    
+    placeholders = ','.join('?' * len(tickers))
+    with get_db() as conn:
+        rows = conn.execute(f"""
+            SELECT DISTINCT ticker FROM signals 
+            WHERE ticker IN ({placeholders})
+            AND scored_at > datetime('now', ?)
+        """, (*tickers, f'-{hours} hours')).fetchall()
+        scored = {r['ticker'] for r in rows}
+        return [t for t in tickers if t not in scored]
+
+
+def get_previous_target(ticker: str, hours: int = 48) -> float | None:
+    """
+    Get the most recent analyst target price for a ticker.
+    Used to detect target price reratings.
+    
+    Returns None if no previous data exists.
+    """
+    with get_db() as conn:
+        row = conn.execute("""
+            SELECT target_price FROM signals 
+            WHERE ticker = ? 
+            AND target_price IS NOT NULL
+            AND scored_at > datetime('now', ?)
+            ORDER BY scored_at DESC
+            LIMIT 1
+        """, (ticker, f'-{hours} hours')).fetchone()
+        return row['target_price'] if row else None
