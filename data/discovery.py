@@ -33,6 +33,35 @@ HEADERS = {
 }
 
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "watchlist_cache.json")
+CACHE_TICKER_FORMAT_VERSION = 2
+
+
+def _extract_finviz_tickers(df) -> Set[str]:
+    """Extract symbols while correcting finvizfinance's duplicated prefix bug."""
+    if df is None or len(df) == 0 or "Ticker" not in df:
+        return set()
+
+    raw_tickers = [
+        str(value).strip().upper()
+        for value in df["Ticker"].tolist()
+        if value is not None
+    ]
+    duplicated_prefixes = sum(
+        len(ticker) > 1 and ticker[0] == ticker[1]
+        for ticker in raw_tickers
+    )
+    has_prefix_bug = (
+        bool(raw_tickers)
+        and duplicated_prefixes / len(raw_tickers) >= 0.8
+    )
+
+    tickers = set()
+    for ticker in raw_tickers:
+        if has_prefix_bug and len(ticker) > 1 and ticker[0] == ticker[1]:
+            ticker = ticker[1:]
+        if re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", ticker):
+            tickers.add(ticker)
+    return tickers
 
 
 # =============================================================================
@@ -67,8 +96,7 @@ def screen_quality_growth() -> Set[str]:
         }
         foverview.set_filter(filters_dict=filters)
         df = foverview.screener_view()
-        if df is not None and len(df) > 0:
-            tickers = set(df['Ticker'].tolist())
+        tickers = _extract_finviz_tickers(df)
         print(f"[discovery] Quality Growth (GARP): {len(tickers)} stocks")
     except Exception as e:
         print(f"[discovery] Quality Growth error: {e}")
@@ -104,8 +132,7 @@ def screen_undervalued_growth() -> Set[str]:
         }
         foverview.set_filter(filters_dict=filters)
         df = foverview.screener_view()
-        if df is not None and len(df) > 0:
-            tickers = set(df['Ticker'].tolist())
+        tickers = _extract_finviz_tickers(df)
         print(f"[discovery] Undervalued Growth: {len(tickers)} stocks")
     except Exception as e:
         print(f"[discovery] Undervalued Growth error: {e}")
@@ -144,8 +171,7 @@ def screen_quality_value() -> Set[str]:
         }
         foverview.set_filter(filters_dict=filters)
         df = foverview.screener_view()
-        if df is not None and len(df) > 0:
-            tickers = set(df['Ticker'].tolist())
+        tickers = _extract_finviz_tickers(df)
         print(f"[discovery] Quality Value: {len(tickers)} stocks")
     except Exception as e:
         print(f"[discovery] Quality Value error: {e}")
@@ -177,8 +203,7 @@ def get_insider_buying_tickers() -> Set[str]:
         }
         foverview.set_filter(filters_dict=filters)
         df = foverview.screener_view()
-        if df is not None and len(df) > 0:
-            tickers = set(df['Ticker'].tolist())
+        tickers = _extract_finviz_tickers(df)
         print(f"[discovery] Insider Buying (bonus signal): {len(tickers)} stocks")
     except Exception as e:
         print(f"[discovery] Insider Buying error: {e}")
@@ -340,6 +365,7 @@ def discover_candidates(
 def save_watchlist(data: Dict) -> None:
     """Save discovery results to cache file."""
     cache = {
+        "ticker_format_version": CACHE_TICKER_FORMAT_VERSION,
         "updated_at": datetime.now().isoformat(),
         "tickers": data["tickers"],
         "insider_tickers": list(data.get("insider_tickers", [])),
@@ -369,6 +395,29 @@ def load_watchlist(core_watchlist: list[str]) -> Dict:
     try:
         with open(CACHE_FILE, "r") as f:
             cache = json.load(f)
+
+        if cache.get("ticker_format_version", 1) < CACHE_TICKER_FORMAT_VERSION:
+            core_set = set(core_watchlist)
+
+            def repair(ticker: str) -> str:
+                ticker = ticker.strip().upper()
+                if (
+                    ticker not in core_set
+                    and len(ticker) > 1
+                    and ticker[0] == ticker[1]
+                ):
+                    return ticker[1:]
+                return ticker
+
+            cache["tickers"] = list(dict.fromkeys(
+                repair(ticker) for ticker in cache.get("tickers", [])
+            ))
+            cache["insider_tickers"] = list(dict.fromkeys(
+                repair(ticker) for ticker in cache.get("insider_tickers", [])
+            ))
+            cache["multi_screen"] = list(dict.fromkeys(
+                repair(ticker) for ticker in cache.get("multi_screen", [])
+            ))
         
         cached_date = datetime.fromisoformat(cache["updated_at"]).date()
         if cached_date == datetime.now().date():

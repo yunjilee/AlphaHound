@@ -12,7 +12,7 @@ AlphaHound/
 ├── main.py              # Scan script — run HOURLY  
 ├── config.py            # Configuration (watchlist, thresholds, API keys)
 ├── scoring.py           # Composite alpha scoring (max 20 pts)
-├── alerts.py            # Telegram notifications
+├── alerts.py            # Direct SMS notifications
 ├── storage.py           # SQLite signal logging
 ├── data/
 │   ├── discovery.py     # Fundamentals-first discovery (Finviz screens)
@@ -95,7 +95,7 @@ pip install -r requirements.txt
 
 # 2. Configure credentials
 cp .env.example .env
-# Edit .env with your Telegram bot token and Reddit API keys
+# Edit .env with your SMS gateway and Reddit API settings
 
 # 3. Test setup
 python test_setup.py
@@ -173,8 +173,8 @@ Insider buying bonus: 94 tickers
 
 | Service | Required | How to Get |
 |---------|----------|------------|
-| Telegram | Yes | Message @BotFather → `/newbot` |
-| Reddit | Yes | https://reddit.com/prefs/apps → Create "script" app |
+| SMS gateway | Yes | Gmail app password plus your carrier's email-to-SMS domain |
+| Reddit | No | https://reddit.com/prefs/apps → Create an app, or set `REDDIT_ENABLED=false` |
 | yfinance | No | Just works |
 | SEC EDGAR | No | Public API |
 | Google Trends | No | Just works (rate limited) |

@@ -232,7 +232,8 @@ def main():
                 print(f"  [ALERT] {s['ticker']}: rerate={has_rerate}, move={daily_change*100:.1f}%")
     
     # Send daily digest (always, summarizes top picks)
-    send_daily_digest(ranked)
+    if send_daily_digest(ranked):
+        print("  [SMS] Daily digest sent")
     
     print(f"\n{'='*60}")
     print(f"  COMPLETE")

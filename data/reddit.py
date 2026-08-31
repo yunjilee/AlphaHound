@@ -1,15 +1,19 @@
 """Monitor Reddit for ticker mention velocity."""
 
 import praw
+import prawcore
 from datetime import datetime, timedelta
-from config import REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET
+from config import REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_ENABLED
 
 _reddit = None
+_reddit_disabled = not REDDIT_ENABLED
 
 
 def _get_reddit():
     """Lazy-initialize Reddit client."""
     global _reddit
+    if _reddit_disabled:
+        return None
     if _reddit is None:
         if not REDDIT_CLIENT_ID or not REDDIT_CLIENT_SECRET:
             return None
@@ -23,6 +27,7 @@ def _get_reddit():
 
 def get_reddit_sentiment(ticker: str) -> dict | None:
     """Get Reddit mention velocity for a ticker."""
+    global _reddit_disabled
     try:
         r = _get_reddit()
         if r is None:
@@ -65,6 +70,14 @@ def get_reddit_sentiment(ticker: str) -> dict | None:
             "top_posts": top_posts,
             "fetched_at": datetime.now().isoformat(),
         }
-    except Exception as e:
-        print(f"    [reddit] Error for {ticker}: {e}")
+    except prawcore.exceptions.ResponseException as error:
+        status = getattr(error.response, "status_code", None)
+        if status in {401, 403}:
+            _reddit_disabled = True
+            print("    [reddit] Authentication failed; disabled for this scan")
+        else:
+            print(f"    [reddit] Request failed for {ticker}: {error}")
+        return None
+    except (prawcore.PrawcoreException, OSError) as error:
+        print(f"    [reddit] Request failed for {ticker}: {error}")
         return None
